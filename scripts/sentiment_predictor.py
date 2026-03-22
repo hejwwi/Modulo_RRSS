@@ -240,4 +240,136 @@ def train_lstm(X_tr_seq, y_tr, X_te_seq, y_te, seq_len: int, n_features: int):
     loader = DataLoader(TensorDataset(X_tr_t, y_tr_t), batch_size=32, shuffle=False)
 
     model = SentimentLSTM(n_features).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, wei
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    criterion = nn.BCEWithLogitsLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+
+    best_loss, patience_count, best_state = float("inf"), 0, None
+    for epoch in range(150):
+        model.train()
+        epoch_loss = 0.0
+        for xb, yb in loader:
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            epoch_loss += loss.item()
+        avg = epoch_loss / len(loader)
+        scheduler.step(avg)
+        if avg < best_loss:
+            best_loss = avg
+            patience_count = 0
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        else:
+            patience_count += 1
+            if patience_count >= 15:
+                logger.info("LSTM early stopping en epoch %d", epoch + 1)
+                break
+
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.no_grad():
+        y_pred = (torch.sigmoid(model(X_te_t)) > 0.5).cpu().numpy().astype(int)
+
+    return {
+        "model":     f"LSTM (seq={seq_len})",
+        "accuracy":  float(accuracy_score(y_te, y_pred)),
+        "precision": float(precision_score(y_te, y_pred, zero_division=0)),
+        "recall":    float(recall_score(y_te, y_pred, zero_division=0)),
+        "f1":        float(f1_score(y_te, y_pred, zero_division=0)),
+        "type": "lstm",
+    }
+
+
+def run(posts: list[dict], window: int, seq_len: int) -> list[dict]:
+    from sklearn.preprocessing import StandardScaler
+
+    df = build_daily_df(posts)
+    df = add_momentum_features(df)
+
+    labels = build_labels(df, window=window)
+    df["_label"] = labels
+    df = df.dropna(subset=["_label"])
+    df["_label"] = df["_label"].astype(int)
+
+    pos = int(df["_label"].sum())
+    neg = len(df) - pos
+    logger.info("Dias: %d | Positivos: %d (%.1f%%) | Negativos: %d (%.1f%%)",
+                len(df), pos, 100*pos/len(df), neg, 100*neg/len(df))
+
+    feature_cols = get_feature_cols(df)
+    X_all = df[feature_cols].fillna(0.0).values.astype(np.float32)
+    y_all = df["_label"].values.astype(np.float32)
+
+    split = int(len(X_all) * 0.8)
+    X_tr_raw, X_te_raw = X_all[:split], X_all[split:]
+    y_tr, y_te = y_all[:split], y_all[split:]
+    logger.info("Train: %d dias | Test: %d dias", len(y_tr), len(y_te))
+
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_tr_raw)
+    X_te = scaler.transform(X_te_raw)
+
+    results = train_classical(X_tr, y_tr, X_te, y_te, feature_cols)
+
+    if len(X_all) >= seq_len + 20:
+        X_scaled = scaler.transform(X_all)
+        X_seq, y_seq = build_sequences(X_scaled, y_all, seq_len)
+        seq_split = int(len(X_seq) * 0.8)
+        lstm_res = train_lstm(
+            X_seq[:seq_split], y_seq[:seq_split],
+            X_seq[seq_split:], y_seq[seq_split:],
+            seq_len, X_seq.shape[2],
+        )
+        if lstm_res:
+            results.append(lstm_res)
+    else:
+        logger.warning("Datos insuficientes para LSTM (necesita >%d dias).", seq_len + 20)
+
+    results.sort(key=lambda r: (r["accuracy"], r["f1"]), reverse=True)
+    return results
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Predictor de sentimiento NVDA a 1 dia vista (sin precio de bolsa)."
+    )
+    parser.add_argument("--input",   required=True, help="JSON de posts analizados")
+    parser.add_argument("--output",  default=None,  help="CSV de salida")
+    parser.add_argument("--window",  type=int, default=1,
+                        help="Ventana de etiqueta en dias (1=manana, 3=promedio 3 dias)")
+    parser.add_argument("--seq_len", type=int, default=7,
+                        help="Longitud de secuencia para LSTM")
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        logger.error("Archivo no encontrado: %s", input_path)
+        sys.exit(1)
+
+    output_path = Path(args.output) if args.output else input_path.parent / "sent_model_comparison.csv"
+
+    logger.info("Cargando posts desde %s ...", input_path)
+    posts = json.load(input_path.open("r", encoding="utf-8"))
+    logger.info("Posts cargados: %d", len(posts))
+
+    results = run(posts, window=args.window, seq_len=args.seq_len)
+
+    print(f"\n=== Prediccion sentimiento +{args.window}d (sin precio) ===")
+    header = f"  {'Modelo':<30} {'Accuracy':>9} {'Precision':>10} {'Recall':>8} {'F1':>8}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for r in results:
+        print(f"  {r['model']:<30} {r['accuracy']:>9.4f} {r['precision']:>10.4f} "
+              f"{r['recall']:>8.4f} {r['f1']:>8.4f}")
+
+    best = results[0]
+    print(f"\n  Mejor modelo: {best['model']}  (accuracy={best['accuracy']:.4f}, f1={best['f1']:.4f})")
+
+    pd.DataFrame(results).to_csv(output_path, index=False)
+    logger.info("Resultados guardados en %s", output_path)
+
+
+if __name__ == "__main__":
+    main()
