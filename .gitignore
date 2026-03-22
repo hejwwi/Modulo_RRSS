@@ -1,8 +1,22 @@
+# Entornos virtuales
 venv/
+.venv/
+
+# Python
 __pycache__/
-
-*.json
 *.pyc
+*.pyo
+.pytest_cache/
 
-# permitir SOLO este archivo
+# Datos generados (no versionar)
+data/
+*.json
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Permitir SOLO el dataset principal de entrada
 !RedditScrapper/Data/final_dataset_clean.json
+!RedditScrapper/Data/nvda_top3_backfill.csv
