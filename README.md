@@ -1,15 +1,14 @@
 # NVDA Reddit Sentiment Prediction
 
-Pipeline completo de análisis de sentimiento multimodal sobre posts de Reddit relacionados con NVIDIA (NVDA), con predicción a 1 día vista usando modelos de ML clásicos y LSTM.
+Pipeline de análisis de sentimiento multimodal sobre posts de Reddit relacionados con NVIDIA (NVDA), con predicción del sentimiento de la comunidad a 1 día vista usando histórico de posts.
 
 ---
 
 ## Descripción
 
-El proyecto analiza el sentimiento de la comunidad inversora en Reddit (wallstreetbets, stocks, investing, etc.) sobre NVIDIA entre 2023 y 2025. Combina análisis de texto con tres modelos NLP (FinBERT, BERT, SocBERT) y análisis de imagen con Ollama para predecir:
+Analiza el sentimiento de la comunidad inversora en Reddit (wallstreetbets, stocks, investing, etc.) sobre NVIDIA entre 2023 y 2025. Combina análisis de texto con tres modelos NLP (FinBERT, BERT, SocBERT) y análisis de imagen con Ollama para predecir si el sentimiento del día siguiente será más positivo o negativo que el actual.
 
-- **Movimiento del precio de NVDA al día siguiente** (con datos de bolsa)
-- **Sentimiento de la comunidad al día siguiente** (sin datos de bolsa)
+**No usa datos de bolsa.** La predicción se basa exclusivamente en el histórico de posts de Reddit.
 
 ---
 
@@ -17,43 +16,36 @@ El proyecto analiza el sentimiento de la comunidad inversora en Reddit (wallstre
 
 ```
 proyecto/
-├── nvidia_sentiment/           # Módulo principal — lógica de negocio
-│   ├── models.py               # Dataclasses: Post, ImageAnalysis, ModelMetrics, ComparisonRow
-│   ├── serializer.py           # save_dataset / load_dataset (JSON UTF-8)
-│   ├── nvda_filter.py          # Filtrado de posts relevantes para NVDA
-│   ├── image_downloader.py     # Descarga de imágenes de posts
-│   ├── image_filter.py         # Filtrado de relevancia de imágenes (Ollama)
-│   ├── text_analyzer.py        # Análisis de sentimiento: FinBERT, BERT, SocBERT
-│   ├── image_analyzer.py       # Análisis de sentimiento de imagen (Ollama llama3.2-vision)
-│   ├── multimodal_comparator.py# Fusión texto + imagen, comparación vs precio
-│   └── predictor.py            # Entrenamiento LR, RF, GBM, MLP con datos de bolsa
+├── nvidia_sentiment/              # Módulo principal — lógica de negocio
+│   ├── models.py                  # Dataclasses: Post, ImageAnalysis, ModelMetrics
+│   ├── serializer.py              # save_dataset / load_dataset (JSON UTF-8)
+│   ├── nvda_filter.py             # Filtrado de posts relevantes para NVDA
+│   ├── image_downloader.py        # Descarga de imágenes de posts
+│   ├── image_filter.py            # Filtrado de relevancia de imágenes (Ollama)
+│   ├── text_analyzer.py           # Análisis de sentimiento: FinBERT, BERT, SocBERT
+│   ├── image_analyzer.py          # Análisis de sentimiento de imagen (Ollama)
+│   └── multimodal_comparator.py   # Fusión texto + imagen
 │
-├── scripts/                    # CLIs individuales por módulo
+├── scripts/                       # CLIs individuales
 │   ├── nvda_filter.py
 │   ├── image_downloader.py
 │   ├── image_filter.py
 │   ├── text_analyzer.py
 │   ├── image_analyzer.py
-│   ├── multimodal_comparator.py
-│   ├── predictor.py            # Predictor con precio de bolsa
-│   └── sentiment_predictor.py  # Predictor de sentimiento SIN precio
+│   └── sentiment_predictor.py     # Predictor de sentimiento a 1 día vista
 │
 ├── RedditScrapper/
 │   ├── Data/
-│   │   ├── final_dataset_clean.json   # Dataset principal de entrada (276k posts)
-│   │   └── nvda_top3_backfill.csv     # Precios históricos NVDA (2023-2025)
+│   │   └── final_dataset_clean.json   # Dataset de entrada (276k posts, 2023-2025)
 │   ├── reddit_scrapper.py
 │   └── reddit_updater.py
 │
-├── data/                       # Salidas generadas (en .gitignore)
-│   ├── images/                 # Imágenes descargadas
-│   ├── nvda_processed.json     # Posts procesados con sentimientos
-│   ├── model_comparison.csv    # Accuracy modelos (con precio)
-│   ├── sent_model_comparison.csv # Accuracy modelos (sin precio)
-│   └── accuracy_comparison.png # Gráfico de barras
+├── data/                          # Salidas generadas (en .gitignore)
+│   ├── images/                    # Imágenes descargadas
+│   ├── nvda_processed.json        # Posts procesados con sentimientos
+│   └── sent_model_comparison.csv  # Resultados de los modelos de predicción
 │
-├── pipeline.py                 # Orquestador principal del pipeline
-├── CHANGES.md                  # Historial de cambios de reorganización
+├── pipeline.py                    # Orquestador principal
 └── README.md
 ```
 
@@ -62,10 +54,10 @@ proyecto/
 ## Requisitos
 
 ```bash
-pip install torch transformers pandas numpy scikit-learn matplotlib yfinance lightgbm requests
+pip install torch transformers pandas numpy scikit-learn matplotlib requests
 ```
 
-Ollama (para análisis de imagen):
+Ollama (para análisis de imagen, opcional):
 ```bash
 ollama pull llama3.2-vision
 ```
@@ -74,25 +66,24 @@ ollama pull llama3.2-vision
 
 ## Pipeline principal
 
-El pipeline ejecuta 7 fases secuenciales con manejo de errores por fase:
+7 fases secuenciales con manejo de errores por fase:
 
 ```
-Dataset JSON
+Dataset JSON (276k posts)
     │
     ▼
 [Fase 1] Filtrado NVDA
     │  Términos: nvidia, nvda, $nvda, geforce, rtx, cuda
-    │  276.445 posts → 13.326 posts NVDA
+    │  276.445 posts → ~13.326 posts NVDA
     ▼
 [Fase 2] Descarga de imágenes
     │  Descarga imágenes de los posts que las tienen
     ▼
 [Fase 3] Filtrado de imágenes (Ollama)
-    │  Descarta GIFs y imágenes no relevantes para el sentimiento
+    │  Descarta GIFs e imágenes no relevantes para el sentimiento
     ▼
 [Fase 4] Análisis de texto
-    │  FinBERT (financiero) + BERT (general) + SocBERT (redes sociales)
-    │  Scores de 0 a 1 por clase
+    │  FinBERT + BERT + SocBERT → scores 0–1 por clase
     ▼
 [Fase 5] Análisis de imagen (Ollama llama3.2-vision)
     │  Solo posts con imagen relevante
@@ -104,36 +95,27 @@ Dataset JSON
     └─ data/nvda_processed.json
 ```
 
-### Uso básico
+### Uso
 
 ```bash
-# Modo prueba (rápido, sin imágenes)
+# Modo prueba rápido (sin imágenes)
 python pipeline.py \
   --input RedditScrapper/Data/final_dataset_clean.json \
   --test_mode \
   --sample_size 500 \
   --skip_image_analysis
 
-# Pipeline completo con predicción de precio
+# Pipeline completo
 python pipeline.py \
   --input RedditScrapper/Data/final_dataset_clean.json \
-  --price_data RedditScrapper/Data/nvda_top3_backfill.csv \
   --output_dir data
-
-# Pipeline completo con análisis de imagen
-python pipeline.py \
-  --input RedditScrapper/Data/final_dataset_clean.json \
-  --price_data RedditScrapper/Data/nvda_top3_backfill.csv \
-  --output_dir data \
-  --ollama_model llama3.2-vision
 ```
 
-### Parámetros del pipeline
+### Parámetros
 
 | Parámetro | Default | Descripción |
 |---|---|---|
 | `--input` | requerido | Ruta al JSON de posts |
-| `--price_data` | None | CSV de precios (date, close) para accuracy |
 | `--images_dir` | `data/images/` | Directorio de imágenes descargadas |
 | `--output_dir` | `data` | Directorio de salida |
 | `--test_mode` | False | Activa modo prueba con subconjunto |
@@ -149,7 +131,7 @@ python pipeline.py \
 
 ## Modelos de análisis de texto
 
-Cada post recibe scores de probabilidad (0–1) de los tres modelos:
+Cada post recibe scores de probabilidad (0–1):
 
 | Campo | Modelo | Descripción |
 |---|---|---|
@@ -168,35 +150,9 @@ SocBERT  pos=0.411  neg=0.589             → ligeramente negativo
 
 ---
 
-## Predictor con precio de bolsa
+## Predictor de sentimiento a 1 día vista
 
-Predice si el precio de NVDA sube o baja al día siguiente usando los scores de sentimiento como features.
-
-```bash
-python scripts/predictor.py \
-  --input data/nvda_processed.json \
-  --price_data RedditScrapper/Data/nvda_top3_backfill.csv \
-  --output data/model_comparison.csv
-```
-
-### Resultados (1000 posts, 809 muestras etiquetadas)
-
-| Modelo | Accuracy | Precision | Recall | F1 |
-|---|---|---|---|---|
-| GradientBoosting | 0.5185 | 0.5041 | 0.7848 | 0.6139 |
-| LogisticRegression | 0.4938 | 0.4907 | 1.0000 | 0.6583 |
-| MLP | 0.4877 | 0.4877 | 1.0000 | 0.6556 |
-| RandomForest | 0.4877 | 0.4818 | 0.6709 | 0.5608 |
-
-> El accuracy ronda el 50% porque predecir el precio de bolsa a partir de sentimiento de Reddit es inherentemente ruidoso. El baseline de "siempre sube" es ~55% dado la tendencia alcista de NVDA en 2023-2024.
-
-Genera `data/model_comparison.csv` y `data/accuracy_comparison.png`.
-
----
-
-## Predictor de sentimiento (sin precio de bolsa)
-
-Predice si el sentimiento de la comunidad será más positivo mañana que hoy, usando únicamente señales de Reddit.
+Predice si el sentimiento de la comunidad será más positivo mañana que hoy, usando únicamente el histórico de posts de Reddit.
 
 ```bash
 python scripts/sentiment_predictor.py \
@@ -206,24 +162,30 @@ python scripts/sentiment_predictor.py \
   --seq_len 7
 ```
 
+### Cómo funciona
+
+1. Agrega los posts por día (promedio de scores de sentimiento)
+2. Calcula features de momentum (rolling 3d, 7d, delta, volatilidad)
+3. Etiqueta: ¿el sentimiento positivo de mañana > hoy? (1=sí, 0=no)
+4. Entrena 5 modelos con división temporal estricta (80% train / 20% test)
+5. Incluye un LSTM que aprende la secuencia de días
+
 ### Features utilizadas
 
 | Feature | Descripción |
 |---|---|
-| `sent_finbert_pos/neg/neu` | Scores FinBERT promedio del día |
-| `sent_bert_pos/neg` | Scores BERT promedio del día |
-| `sent_socbert_pos/neg` | Scores SocBERT promedio del día |
-| `sent_*_roll3/roll7` | Rolling mean 3 y 7 días (momentum) |
+| `sent_finbert/bert/socbert_*` | Scores de sentimiento promedio del día |
+| `sent_*_roll3 / roll7` | Media móvil 3 y 7 días (momentum) |
 | `sent_*_delta` | Cambio respecto al día anterior |
 | `sent_*_momentum` | Diferencia roll3 - roll7 (tendencia corta vs larga) |
 | `finbert_vol7` | Volatilidad del sentimiento (std 7 días) |
-| `finbert_confidence` | max(pos, neg, neu) — certeza del modelo |
+| `finbert_confidence` | Certeza del modelo (max de las 3 clases) |
 | `sentiment_agreement` | 1 si los 3 modelos coinciden |
-| `finbert_bert_diff` | Diferencia entre FinBERT y BERT |
+| `finbert_bert_diff` | Discrepancia entre FinBERT y BERT |
 | `score_norm` | Upvotes normalizados |
 | `num_comments_norm` | Comentarios normalizados |
 | `n_posts` | Volumen de posts del día |
-| `sub_*` | Fracción de posts por subreddit (one-hot) |
+| `sub_*` | Fracción de posts por subreddit (one-hot top-5) |
 
 ### Resultados (1000 posts, 541 días)
 
@@ -236,16 +198,16 @@ python scripts/sentiment_predictor.py \
 | LSTM (seq=7) | 0.5327 | 0.5106 | 0.4706 | 0.4898 |
 | Baseline | 0.4862 | — | — | — |
 
-> El sentimiento de Reddit tiene inercia: si hoy es positivo, mañana tiende a serlo. La Regresión Logística captura bien esta autocorrelación con 71.5% de accuracy.
+El sentimiento de Reddit tiene inercia: si hoy es positivo, mañana tiende a serlo. La Regresión Logística captura bien esta autocorrelación con **71.5% de accuracy**.
 
 ### Features más importantes (RandomForest)
 
 ```
-sent_finbert_pos          0.1574  ████████
-sent_finbert_pos_delta    0.1057  █████       ← cambio diario es clave
-finbert_bert_diff         0.0685  ███
-sent_finbert_pos_roll3    0.0462  ██
-sent_finbert_neg          0.0432  ██
+sent_finbert_pos          0.1574  ← score positivo del día
+sent_finbert_pos_delta    0.1057  ← cambio diario (momentum)
+finbert_bert_diff         0.0685  ← discrepancia entre modelos
+sent_finbert_pos_roll3    0.0462  ← tendencia de 3 días
+sent_finbert_neg          0.0432
 ```
 
 ### Parámetros
@@ -255,56 +217,40 @@ sent_finbert_neg          0.0432  ██
 | `--window` | 1 | Días vista para la etiqueta (1=mañana, 3=promedio 3 días) |
 | `--seq_len` | 7 | Longitud de secuencia para LSTM |
 
----
-
-## Arquitectura LSTM
-
-Para capturar patrones temporales, el predictor incluye un LSTM bidireccional:
+### Arquitectura LSTM
 
 ```
 Secuencia de seq_len días
         │
-    [LSTM × 2 capas, hidden=64]
+    [LSTM × 2 capas, hidden=64, dropout=0.3]
         │
-    [Dropout 0.3]
+    [último timestep → Linear 64→32 → ReLU → Linear 32→1]
         │
-    [último timestep]
-        │
-    [Linear 64→32 → ReLU → Dropout → Linear 32→1]
-        │
-    [BCEWithLogitsLoss]
+    [BCEWithLogitsLoss + early stopping (paciencia=15)]
 ```
 
-- Early stopping con paciencia de 15 epochs
-- Gradient clipping (max_norm=1.0)
-- ReduceLROnPlateau scheduler
-- División temporal estricta (sin shuffle)
-
-> Con 541 días el LSTM tiene datos limitados. Con los 13.326 posts NVDA completos (~700+ días únicos) el rendimiento mejora significativamente.
+> Con 541 días el LSTM tiene datos limitados. Procesando los 13.326 posts NVDA completos se obtienen ~700 días únicos y el rendimiento mejora.
 
 ---
 
 ## Cómo mejorar la accuracy
 
-Para mejorar la predicción de sentimiento a 1 día vista:
-
-1. **Más datos** — procesar todos los 13.326 posts NVDA filtrados en lugar de 1000
-2. **Análisis de imagen** — activar Ollama para los posts con imagen (actualmente `image_score=0`)
-3. **Ventana de 3 días** — usar `--window 3` reduce el ruido de días individuales
-4. **Secuencia más larga** — `--seq_len 14` o `--seq_len 30` para el LSTM con más datos
-5. **Features externas** — volumen de trading, VIX, noticias de NVDA del día
-6. **Fine-tuning de FinBERT** — entrenar FinBERT específicamente sobre posts de NVDA
+1. **Más datos** — procesar todos los 13.326 posts NVDA filtrados (actualmente se usan 1000)
+2. **Ventana de 3 días** — `--window 3` reduce el ruido de días individuales
+3. **Secuencia más larga** — `--seq_len 14` o `--seq_len 30` con más datos para el LSTM
+4. **Análisis de imagen** — activar Ollama para posts con imagen (actualmente `image_score=0`)
+5. **Subreddit como señal** — wallstreetbets vs investing tienen tonos muy distintos (ya incluido)
 
 ---
 
 ## Dataset
 
-El dataset `final_dataset_clean.json` contiene 276.445 posts de Reddit (2023-2025) con los campos:
+`final_dataset_clean.json` — 276.445 posts de Reddit (2023-2025):
 
 | Campo | Tipo | Descripción |
 |---|---|---|
 | `id` | str | ID único del post |
-| `title` | str | Título del post |
+| `title` | str | Título |
 | `selftext` | str | Cuerpo del post |
 | `subreddit` | str | Subreddit de origen |
 | `created_utc` | int | Timestamp Unix |
@@ -314,7 +260,7 @@ El dataset `final_dataset_clean.json` contiene 276.445 posts de Reddit (2023-202
 | `image_urls` | list | URLs de imágenes adjuntas |
 | `has_image` | bool | Si el post tiene imagen |
 
-Tras el pipeline se añaden los campos de sentimiento (`sent_*`) y análisis de imagen (`image_analysis`).
+Tras el pipeline se añaden los campos `sent_finbert_*`, `sent_bert_*`, `sent_socbert_*`, `sent_text_only`, `sent_multimodal` e `image_analysis`.
 
 ---
 
@@ -323,16 +269,6 @@ Tras el pipeline se añaden los campos de sentimiento (`sent_*`) y análisis de 
 Para actualizar el dataset con posts nuevos:
 
 ```bash
-python RedditScrapper/reddit_scrapper.py   # scraping inicial
-python RedditScrapper/reddit_updater.py    # actualización incremental
+python RedditScrapper/reddit_scrapper.py    # scraping inicial
+python RedditScrapper/reddit_updater.py     # actualización incremental
 ```
-
----
-
-## Tests
-
-```bash
-pytest tests/
-```
-
-La carpeta `tests/` incluye tests unitarios y de propiedades (property-based testing con `hypothesis`).

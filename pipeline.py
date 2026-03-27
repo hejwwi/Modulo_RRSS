@@ -11,6 +11,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -52,49 +54,17 @@ def _print_sentiment_summary(posts: list[dict]) -> None:
     print(f"  SocBERT  pos={avg('sent_socbert_pos'):.3f}  neg={avg('sent_socbert_neg'):.3f}")
 
 
-def _print_model_accuracy(posts: list[dict], price_data_path: Path | None) -> None:
-    """Entrena y muestra accuracy de LR, RF, GBM, MLP si hay datos de precio."""
-    if not price_data_path or not price_data_path.exists():
-        return
-    try:
-        import pandas as pd
-        from nvidia_sentiment.predictor import build_features, temporal_split, train_and_evaluate
-        from nvidia_sentiment.multimodal_comparator import load_price_data
-
-        price_df = load_price_data(price_data_path)
-        X, y = build_features(posts, price_df)
-        if X.empty or len(y) < 5:
-            logger.warning("[pipeline] Datos insuficientes para entrenar modelos.")
-            return
-
-        X_train, y_train, X_test, y_test = temporal_split(X, y)
-        if len(y_test) == 0:
-            return
-
-        metrics = train_and_evaluate(X_train, y_train, X_test, y_test)
-        print("\n--- Accuracy de modelos de predicción ---")
-        header = f"  {'Modelo':<22} {'Accuracy':>9} {'F1':>8}"
-        print(header)
-        print("  " + "-" * (len(header) - 2))
-        for m in metrics:
-            print(f"  {m['model_name']:<22} {m['accuracy']:>9.4f} {m['f1']:>8.4f}")
-    except Exception as exc:
-        logger.warning("[pipeline] No se pudo calcular accuracy de modelos: %s", exc)
-
-
 def _print_test_summary(
     posts: list[dict],
     posts_with_image: int,
     posts_ollama: int,
-    price_data_path: Path | None,
 ) -> None:
-    """Muestra el resumen final del modo prueba (Requisito 7.4)."""
+    """Muestra el resumen final del modo prueba."""
     print("\n=== Resumen Modo Prueba ===")
     print(f"Posts procesados:        {len(posts)}")
     print(f"Posts con imagen:        {posts_with_image}")
     print(f"Posts analizados Ollama: {posts_ollama}")
     _print_sentiment_summary(posts)
-    _print_model_accuracy(posts, price_data_path)
     print()
 
 
@@ -190,6 +160,50 @@ def phase_fuse_sentiment(
     return result
 
 
+def phase_fetch_current_posts(symbol: str, subreddits: list[str], limit: int) -> list[dict]:
+    """Descarga posts actuales de Reddit via API pública (sin OAuth)."""
+    import time
+    import requests
+
+    headers = {"User-Agent": "nvda-sentiment-bot/1.0"}
+    results: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for sub in subreddits:
+        url = f"https://www.reddit.com/r/{sub}/search.json"
+        params = {"q": symbol, "sort": "new", "limit": min(limit, 100), "t": "week", "restrict_sr": 1}
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code != 200:
+                logger.warning("[pipeline] Reddit %s devolvió %d", sub, resp.status_code)
+                continue
+            children = resp.json().get("data", {}).get("children", [])
+            for child in children:
+                p = child.get("data", {})
+                pid = p.get("id", "")
+                if not pid or pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
+                results.append({
+                    "id": pid,
+                    "title": p.get("title", ""),
+                    "selftext": p.get("selftext", ""),
+                    "subreddit": p.get("subreddit", sub),
+                    "created_utc": int(p.get("created_utc", 0)),
+                    "date": str(pd.to_datetime(p.get("created_utc", 0), unit="s").date()),
+                    "score": int(p.get("score", 0)),
+                    "num_comments": int(p.get("num_comments", 0)),
+                    "has_image": bool(p.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif", ".webp"))),
+                    "image_urls": [p.get("url", "")] if p.get("url", "").startswith("http") else [],
+                })
+            time.sleep(1)  # respetar rate limit
+        except Exception as exc:
+            logger.warning("[pipeline] Error scraping r/%s: %s", sub, exc)
+
+    logger.info("[pipeline] Posts actuales descargados de Reddit: %d", len(results))
+    return results
+
+
 def phase_save_dataset(posts: list[dict], output_path: Path) -> None:
     """Fase 7: Serialización del dataset procesado."""
     from nvidia_sentiment.serializer import save_dataset
@@ -202,12 +216,11 @@ def phase_save_dataset(posts: list[dict], output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def run_pipeline(args: argparse.Namespace) -> None:
-    """Ejecuta el pipeline completo con manejo de errores por fase (Requisito 7.5)."""
+    """Ejecuta el pipeline completo con manejo de errores por fase."""
     input_path = Path(args.input)
     images_dir = Path(args.images_dir)
     output_dir = Path(args.output_dir)
-    output_path = output_dir / "nvda_processed.json"
-    price_data_path = Path(args.price_data) if args.price_data else None
+    output_path = output_dir / "nvda_processed.csv"
     models = args.models.split() if isinstance(args.models, str) else args.models
 
     # ── Carga inicial ──────────────────────────────────────────────────────
@@ -229,25 +242,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     # ── Modo prueba: selección de N posts ─────────────────────────────────
     if args.test_mode:
-        logger.info(
-            "[pipeline] Modo prueba activo — seleccionando %d posts",
-            args.sample_size,
-        )
+        logger.info("[pipeline] Modo prueba activo — seleccionando %d posts", args.sample_size)
         try:
-            if price_data_path and price_data_path.exists():
-                # Seleccionar posts dentro del rango de precios disponibles
-                import csv as _csv
-                with price_data_path.open("r") as _f:
-                    _rows = list(_csv.DictReader(_f))
-                if _rows:
-                    _dates = sorted(r["date"] for r in _rows)
-                    from nvidia_sentiment.nvda_filter import select_sample_in_range
-                    posts = select_sample_in_range(posts, args.sample_size, _dates[0], _dates[-1])
-                else:
-                    from nvidia_sentiment.nvda_filter import select_sample
-                    posts = select_sample(posts, args.sample_size)
-            else:
-                posts = phase_select_sample(posts, args.sample_size)
+            posts = phase_select_sample(posts, args.sample_size)
             logger.info("[pipeline] Posts seleccionados para prueba: %d", len(posts))
         except Exception as exc:
             logger.error("[pipeline] phase=select_sample: %s", exc)
@@ -300,6 +297,25 @@ def run_pipeline(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.error("[pipeline] phase=fuse_sentiment: %s", exc)
 
+    # ── Fase 6.5: Enriquecer con posts actuales de Reddit ─────────────────
+    if args.fetch_current:
+        logger.info("[pipeline] Fase 6.5: Descargando posts actuales de Reddit")
+        try:
+            current_subreddits = ["wallstreetbets", "stocks", "investing", "StockMarket", "nvidia"]
+            current_posts = phase_fetch_current_posts("NVDA", current_subreddits, limit=50)
+            if current_posts:
+                # Analizar sentimiento de los posts actuales
+                current_posts = phase_analyze_text(current_posts, models, args.max_length)
+                current_posts = phase_fuse_sentiment(current_posts, args.text_weight, args.image_weight)
+                # Añadir al CSV existente (deduplicando)
+                from nvidia_sentiment.serializer import append_posts
+                added = append_posts(current_posts, output_path)
+                logger.info("[pipeline] Posts actuales añadidos al CSV: %d", added)
+                # Incluir en posts para el resumen
+                posts = posts + [p for p in current_posts if p.get("id") not in {x.get("id") for x in posts}]
+        except Exception as exc:
+            logger.error("[pipeline] phase=fetch_current: %s", exc)
+
     # ── Fase 7: Serialización ──────────────────────────────────────────────
     logger.info("[pipeline] Fase 7: Guardando dataset procesado en %s", output_path)
     try:
@@ -309,15 +325,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     # ── Resumen modo prueba ────────────────────────────────────────────────
     if args.test_mode:
-        posts_with_image = sum(
-            1 for p in posts if p.get("image_download_status") == "ok"
-        )
+        posts_with_image = sum(1 for p in posts if p.get("image_download_status") == "ok")
         posts_ollama = sum(
             1 for p in posts
             if isinstance(p.get("image_analysis"), dict)
             and not p["image_analysis"].get("error", True)
         )
-        _print_test_summary(posts, posts_with_image, posts_ollama, price_data_path)
+        _print_test_summary(posts, posts_with_image, posts_ollama)
 
 
 # ---------------------------------------------------------------------------
@@ -333,11 +347,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--input",
         required=True,
         help="Ruta al archivo final_dataset_clean.json",
-    )
-    parser.add_argument(
-        "--price_data",
-        default=None,
-        help="Ruta al CSV de precios (opcional, para accuracy preliminar en modo prueba)",
     )
     parser.add_argument(
         "--images_dir",
@@ -391,6 +400,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--models",
         default="finbert bert socbert",
         help="Modelos de texto a usar (separados por espacio)",
+    )
+    parser.add_argument(
+        "--fetch_current",
+        action="store_true",
+        help="Descargar posts actuales de Reddit y añadirlos al CSV de entrenamiento",
     )
     parser.add_argument(
         "--max_length",

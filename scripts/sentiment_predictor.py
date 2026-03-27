@@ -335,8 +335,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Predictor de sentimiento NVDA a 1 dia vista (sin precio de bolsa)."
     )
-    parser.add_argument("--input",   required=True, help="JSON de posts analizados")
-    parser.add_argument("--output",  default=None,  help="CSV de salida")
+    parser.add_argument("--input",   required=True, help="CSV o JSON de posts analizados")
+    parser.add_argument("--output",  default=None,  help="CSV de salida con resultados")
     parser.add_argument("--window",  type=int, default=1,
                         help="Ventana de etiqueta en dias (1=manana, 3=promedio 3 dias)")
     parser.add_argument("--seq_len", type=int, default=7,
@@ -344,6 +344,13 @@ def main() -> None:
     args = parser.parse_args()
 
     input_path = Path(args.input)
+    # Aceptar .csv o .json; si se pasa .json pero existe .csv, usar el .csv
+    if input_path.suffix == ".json":
+        csv_candidate = input_path.with_suffix(".csv")
+        if csv_candidate.exists():
+            input_path = csv_candidate
+            logger.info("Usando CSV en lugar de JSON: %s", input_path)
+
     if not input_path.exists():
         logger.error("Archivo no encontrado: %s", input_path)
         sys.exit(1)
@@ -351,7 +358,17 @@ def main() -> None:
     output_path = Path(args.output) if args.output else input_path.parent / "sent_model_comparison.csv"
 
     logger.info("Cargando posts desde %s ...", input_path)
-    posts = json.load(input_path.open("r", encoding="utf-8"))
+    if input_path.suffix == ".csv":
+        df_in = pd.read_csv(input_path, dtype=str).fillna("")
+        # Convertir columnas numéricas a float
+        numeric_cols = [c for c in df_in.columns if any(
+            c.startswith(p) for p in ("sent_", "score", "num_comments", "created_utc")
+        )]
+        for col in numeric_cols:
+            df_in[col] = pd.to_numeric(df_in[col], errors="coerce").fillna(0.0)
+        posts = df_in.to_dict(orient="records")
+    else:
+        posts = json.load(input_path.open("r", encoding="utf-8"))
     logger.info("Posts cargados: %d", len(posts))
 
     results = run(posts, window=args.window, seq_len=args.seq_len)

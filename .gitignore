@@ -11,12 +11,11 @@ __pycache__/
 # Datos generados (no versionar)
 data/
 *.json
-*.csv
 *.png
 *.jpg
 *.jpeg
 *.webp
-*.kiro
+
 # Permitir SOLO el dataset principal de entrada
 !RedditScrapper/Data/final_dataset_clean.json
 !RedditScrapper/Data/nvda_top3_backfill.csv
