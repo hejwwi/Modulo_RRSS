@@ -427,6 +427,14 @@ def run_window(
         r["best_params"] = json.dumps(best_params)
         results.append(r)
 
+        # Guardar modelo + scaler en disco
+        import joblib, os
+        models_dir = Path("data/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
+        joblib.dump({"model": clf, "scaler": scaler, "feature_cols": feature_cols},
+                    models_dir / f"w{window}_{safe_name}.pkl")
+
         # Permutation importance para el mejor modelo (LR)
         if name == "LogisticRegression":
             perm = permutation_importance_scores(clf, X_te, y_te, feature_cols, n_repeats=5)
