@@ -1,12 +1,6 @@
 # NVDA Reddit Sentiment Prediction
 
-Pipeline de análisis de sentimiento multimodal sobre posts de Reddit relacionados con NVIDIA (NVDA), con predicción del sentimiento de la comunidad a 1 día vista usando histórico de posts.
-
----
-
-## Descripción
-
-Analiza el sentimiento de la comunidad inversora en Reddit (wallstreetbets, stocks, investing, etc.) sobre NVIDIA entre 2023 y 2025. Combina análisis de texto con tres modelos NLP (FinBERT, BERT, SocBERT) y análisis de imagen con Ollama para predecir si el sentimiento del día siguiente será más positivo o negativo que el actual.
+Pipeline de análisis de sentimiento sobre posts de Reddit relacionados con NVIDIA (NVDA), con predicción del sentimiento de la comunidad a N días vista usando histórico 2023-2026.
 
 **No usa datos de bolsa.** La predicción se basa exclusivamente en el histórico de posts de Reddit.
 
@@ -18,7 +12,7 @@ Analiza el sentimiento de la comunidad inversora en Reddit (wallstreetbets, stoc
 proyecto/
 ├── nvidia_sentiment/              # Módulo principal — lógica de negocio
 │   ├── models.py                  # Dataclasses: Post, ImageAnalysis, ModelMetrics
-│   ├── serializer.py              # save_dataset / load_dataset (JSON UTF-8)
+│   ├── serializer.py              # save/load dataset en CSV UTF-8
 │   ├── nvda_filter.py             # Filtrado de posts relevantes para NVDA
 │   ├── image_downloader.py        # Descarga de imágenes de posts
 │   ├── image_filter.py            # Filtrado de relevancia de imágenes (Ollama)
@@ -26,13 +20,9 @@ proyecto/
 │   ├── image_analyzer.py          # Análisis de sentimiento de imagen (Ollama)
 │   └── multimodal_comparator.py   # Fusión texto + imagen
 │
-├── scripts/                       # CLIs individuales
-│   ├── nvda_filter.py
-│   ├── image_downloader.py
-│   ├── image_filter.py
-│   ├── text_analyzer.py
-│   ├── image_analyzer.py
-│   └── sentiment_predictor.py     # Predictor de sentimiento a 1 día vista
+├── scripts/
+│   ├── sentiment_predictor.py     # Predictor principal (Optuna + LSTM + modelos clásicos)
+│   └── update_dataset.py          # Actualizador incremental de posts nuevos
 │
 ├── RedditScrapper/
 │   ├── Data/
@@ -42,11 +32,10 @@ proyecto/
 │
 ├── data/                          # Salidas generadas (en .gitignore)
 │   ├── images/                    # Imágenes descargadas
-│   ├── nvda_processed.json        # Posts procesados con sentimientos
+│   ├── nvda_processed.csv         # Posts procesados con sentimiento FinBERT
 │   └── sent_model_comparison.csv  # Resultados de los modelos de predicción
 │
-├── pipeline.py                    # Orquestador principal
-└── README.md
+└── pipeline.py                    # Orquestador principal
 ```
 
 ---
@@ -54,7 +43,7 @@ proyecto/
 ## Requisitos
 
 ```bash
-pip install torch transformers pandas numpy scikit-learn matplotlib requests
+pip install torch transformers pandas numpy scikit-learn optuna requests
 ```
 
 Ollama (para análisis de imagen, opcional):
@@ -66,209 +55,118 @@ ollama pull llama3.2-vision
 
 ## Pipeline principal
 
-7 fases secuenciales con manejo de errores por fase:
+```bash
+# Procesar todos los posts NVDA con FinBERT (tarda ~40 min)
+python pipeline.py --input RedditScrapper/Data/final_dataset_clean.json \
+  --skip_image_analysis --skip_download --output_dir data
 
-```
-Dataset JSON (276k posts)
-    │
-    ▼
-[Fase 1] Filtrado NVDA
-    │  Términos: nvidia, nvda, $nvda, geforce, rtx, cuda
-    │  276.445 posts → ~13.326 posts NVDA
-    ▼
-[Fase 2] Descarga de imágenes
-    │  Descarga imágenes de los posts que las tienen
-    ▼
-[Fase 3] Filtrado de imágenes (Ollama)
-    │  Descarta GIFs e imágenes no relevantes para el sentimiento
-    ▼
-[Fase 4] Análisis de texto
-    │  FinBERT + BERT + SocBERT → scores 0–1 por clase
-    ▼
-[Fase 5] Análisis de imagen (Ollama llama3.2-vision)
-    │  Solo posts con imagen relevante
-    ▼
-[Fase 6] Fusión multimodal
-    │  text_weight=0.75, image_weight=0.25
-    ▼
-[Fase 7] Serialización
-    └─ data/nvda_processed.json
+# Modo prueba rápido
+python pipeline.py --input RedditScrapper/Data/final_dataset_clean.json \
+  --test_mode --sample_size 200 --skip_image_analysis
 ```
 
-### Uso
+## Actualizar con posts nuevos
 
 ```bash
-# Modo prueba rápido (sin imágenes)
-python pipeline.py \
-  --input RedditScrapper/Data/final_dataset_clean.json \
-  --test_mode \
-  --sample_size 500 \
-  --skip_image_analysis
+# Añade posts de los últimos 7 días (deduplicando automáticamente)
+python scripts/update_dataset.py
 
-# Pipeline completo
-python pipeline.py \
-  --input RedditScrapper/Data/final_dataset_clean.json \
-  --output_dir data
+# Personalizado
+python scripts/update_dataset.py --days 14 --min_score 20 --dry_run
 ```
 
-### Parámetros
-
-| Parámetro | Default | Descripción |
-|---|---|---|
-| `--input` | requerido | Ruta al JSON de posts |
-| `--images_dir` | `data/images/` | Directorio de imágenes descargadas |
-| `--output_dir` | `data` | Directorio de salida |
-| `--test_mode` | False | Activa modo prueba con subconjunto |
-| `--sample_size` | 200 | Posts a procesar en modo prueba |
-| `--skip_download` | False | Omite descarga de imágenes |
-| `--skip_image_analysis` | False | Omite fases 3 y 5 (Ollama) |
-| `--models` | `finbert bert socbert` | Modelos de texto a usar |
-| `--text_weight` | 0.75 | Peso del texto en fusión multimodal |
-| `--image_weight` | 0.25 | Peso de la imagen en fusión multimodal |
-| `--ollama_model` | `llama3.2-vision` | Modelo Ollama para imágenes |
-
----
-
-## Modelos de análisis de texto
-
-Cada post recibe scores de probabilidad (0–1):
-
-| Campo | Modelo | Descripción |
-|---|---|---|
-| `sent_finbert_pos/neg/neu` | [FinBERT](https://huggingface.co/ProsusAI/finbert) | Sentimiento financiero (3 clases) |
-| `sent_bert_pos/neg` | [DistilBERT SST-2](https://huggingface.co/distilbert-base-uncased-finetuned-sst-2-english) | Sentimiento general (2 clases) |
-| `sent_socbert_pos/neg` | [SocBERT](https://huggingface.co/sarkerlab/SocBERT-base) | Sentimiento en redes sociales (2 clases) |
-| `image_analysis.score` | Ollama llama3.2-vision | Relevancia de imagen para NVDA (0–1) |
-
-Resultados observados con 1000 posts NVDA (2023-2025):
-
-```
-FinBERT  pos=0.171  neg=0.178  neu=0.652   → tono mayormente neutro
-BERT     pos=0.234  neg=0.766              → más negativo (modelo general)
-SocBERT  pos=0.411  neg=0.589             → ligeramente negativo
-```
-
----
-
-## Predictor de sentimiento a 1 día vista
-
-Predice si el sentimiento de la comunidad será más positivo mañana que hoy, usando únicamente el histórico de posts de Reddit.
+## Entrenar los modelos de predicción
 
 ```bash
 python scripts/sentiment_predictor.py \
-  --input data/nvda_processed.json \
-  --output data/sent_model_comparison.csv \
-  --window 1 \
-  --seq_len 7
+  --input data/nvda_processed.csv \
+  --windows 1 3 5 10 21 \
+  --n_trials 30 \
+  --seq_len 30
 ```
-
-### Cómo funciona
-
-1. Agrega los posts por día (promedio de scores de sentimiento)
-2. Calcula features de momentum (rolling 3d, 7d, delta, volatilidad)
-3. Etiqueta: ¿el sentimiento positivo de mañana > hoy? (1=sí, 0=no)
-4. Entrena 5 modelos con división temporal estricta (80% train / 20% test)
-5. Incluye un LSTM que aprende la secuencia de días
-
-### Features utilizadas
-
-| Feature | Descripción |
-|---|---|
-| `sent_finbert/bert/socbert_*` | Scores de sentimiento promedio del día |
-| `sent_*_roll3 / roll7` | Media móvil 3 y 7 días (momentum) |
-| `sent_*_delta` | Cambio respecto al día anterior |
-| `sent_*_momentum` | Diferencia roll3 - roll7 (tendencia corta vs larga) |
-| `finbert_vol7` | Volatilidad del sentimiento (std 7 días) |
-| `finbert_confidence` | Certeza del modelo (max de las 3 clases) |
-| `sentiment_agreement` | 1 si los 3 modelos coinciden |
-| `finbert_bert_diff` | Discrepancia entre FinBERT y BERT |
-| `score_norm` | Upvotes normalizados |
-| `num_comments_norm` | Comentarios normalizados |
-| `n_posts` | Volumen de posts del día |
-| `sub_*` | Fracción de posts por subreddit (one-hot top-5) |
-
-### Resultados (1000 posts, 541 días)
-
-| Modelo | Accuracy | Precision | Recall | F1 |
-|---|---|---|---|---|
-| **LogisticRegression** | **0.7156** | 0.7037 | 0.7170 | 0.7103 |
-| MLP | 0.6881 | 0.7111 | 0.6038 | 0.6531 |
-| RandomForest | 0.6789 | 0.6957 | 0.6038 | 0.6465 |
-| GradientBoosting | 0.6422 | 0.6591 | 0.5472 | 0.5979 |
-| LSTM (seq=7) | 0.5327 | 0.5106 | 0.4706 | 0.4898 |
-| Baseline | 0.4862 | — | — | — |
-
-El sentimiento de Reddit tiene inercia: si hoy es positivo, mañana tiende a serlo. La Regresión Logística captura bien esta autocorrelación con **71.5% de accuracy**.
-
-### Features más importantes (RandomForest)
-
-```
-sent_finbert_pos          0.1574  ← score positivo del día
-sent_finbert_pos_delta    0.1057  ← cambio diario (momentum)
-finbert_bert_diff         0.0685  ← discrepancia entre modelos
-sent_finbert_pos_roll3    0.0462  ← tendencia de 3 días
-sent_finbert_neg          0.0432
-```
-
-### Parámetros
-
-| Parámetro | Default | Descripción |
-|---|---|---|
-| `--window` | 1 | Días vista para la etiqueta (1=mañana, 3=promedio 3 días) |
-| `--seq_len` | 7 | Longitud de secuencia para LSTM |
-
-### Arquitectura LSTM
-
-```
-Secuencia de seq_len días
-        │
-    [LSTM × 2 capas, hidden=64, dropout=0.3]
-        │
-    [último timestep → Linear 64→32 → ReLU → Linear 32→1]
-        │
-    [BCEWithLogitsLoss + early stopping (paciencia=15)]
-```
-
-> Con 541 días el LSTM tiene datos limitados. Procesando los 13.326 posts NVDA completos se obtienen ~700 días únicos y el rendimiento mejora.
-
----
-
-## Cómo mejorar la accuracy
-
-1. **Más datos** — procesar todos los 13.326 posts NVDA filtrados (actualmente se usan 1000)
-2. **Ventana de 3 días** — `--window 3` reduce el ruido de días individuales
-3. **Secuencia más larga** — `--seq_len 14` o `--seq_len 30` con más datos para el LSTM
-4. **Análisis de imagen** — activar Ollama para posts con imagen (actualmente `image_score=0`)
-5. **Subreddit como señal** — wallstreetbets vs investing tienen tonos muy distintos (ya incluido)
 
 ---
 
 ## Dataset
 
-`final_dataset_clean.json` — 276.445 posts de Reddit (2023-2025):
+13.326 posts NVDA filtrados de 276.445 posts totales (2023-2025), más posts de 2026 añadidos via API de Reddit. Distribuidos en 1.080 días únicos con 12.3 posts/día de promedio.
 
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `id` | str | ID único del post |
-| `title` | str | Título |
-| `selftext` | str | Cuerpo del post |
-| `subreddit` | str | Subreddit de origen |
-| `created_utc` | int | Timestamp Unix |
-| `date` | str | Fecha ISO 8601 |
-| `score` | int | Upvotes netos |
-| `num_comments` | int | Número de comentarios |
-| `image_urls` | list | URLs de imágenes adjuntas |
-| `has_image` | bool | Si el post tiene imagen |
-
-Tras el pipeline se añaden los campos `sent_finbert_*`, `sent_bert_*`, `sent_socbert_*`, `sent_text_only`, `sent_multimodal` e `image_analysis`.
+| Año | Posts |
+|---|---|
+| 2023 | 2.697 |
+| 2024 | 6.903 |
+| 2025 | 3.726 |
 
 ---
 
-## Scraper de Reddit
+## Por qué FinBERT y no SocBERT
 
-Para actualizar el dataset con posts nuevos:
+Se probaron tres modelos de análisis de sentimiento de texto:
 
-```bash
-python RedditScrapper/reddit_scrapper.py    # scraping inicial
-python RedditScrapper/reddit_updater.py     # actualización incremental
-```
+| Modelo | Dominio | std diario | Adecuado |
+|---|---|---|---|
+| [FinBERT](https://huggingface.co/ProsusAI/finbert) | Noticias financieras | **0.24** | Sí |
+| [DistilBERT SST-2](https://huggingface.co/distilbert-base-uncased-finetuned-sst-2-english) | Reseñas generales | 0.18 | Parcial |
+| [SocBERT](https://huggingface.co/sarkerlab/SocBERT-base) | Redes sociales | 0.027 | No |
+
+**SocBERT fue descartado** porque sus scores tienen una varianza 10 veces menor que FinBERT. Todos los posts de NVDA en Reddit reciben scores entre 0.45 y 0.55, sin apenas diferenciación. Esto hace que cualquier etiqueta derivada de SocBERT sea predecible trivialmente por mean-reversion estadística (cuando el score es 0.47 casi siempre sube a 0.51 al día siguiente, y viceversa), no por aprendizaje real. El accuracy del 72% que mostraba con SocBERT era un artefacto matemático, no señal predictiva.
+
+**FinBERT fue elegido** porque está entrenado específicamente en noticias y análisis financieros, el mismo dominio que los posts de inversión en Reddit. Sus scores tienen std=0.24, lo que significa que diferencia claramente entre posts muy positivos (earnings beat, nuevo producto) y muy negativos (caída de mercado, competencia). Esta varianza es la que permite a los modelos de ML aprender patrones reales.
+
+---
+
+## Por qué se eliminó el subreddit como feature
+
+Se realizó un test de ablación comparando accuracy con y sin las features de subreddit (wallstreetbets, stocks, investing, StockMarket, nvidia, pennystocks):
+
+| Ventana | Con subreddit | Sin subreddit | Diferencia |
+|---|---|---|---|
+| +1 día | 68.3% | 68.7% | -0.4% (ruido) |
+| +3 días | 53.3% | 54.6% | -1.3% (ruido) |
+| +5 días | 52.0% | 48.5% | +3.5% (útil) |
+| +10 días | 50.7% | 47.1% | +3.5% (útil) |
+
+A corto plazo (1-3 días) el subreddit de origen es ruido puro — añadirlo empeora el modelo. Esto tiene sentido: el tono del día a día en wallstreetbets vs investing es diferente, pero esa diferencia no predice el sentimiento del día siguiente porque los posts de distintos subreddits se mezclan en el agregado diario.
+
+A partir de 5 días el subreddit aporta algo (+3.5%), probablemente porque distintas comunidades tienen ciclos de hype/miedo con duraciones diferentes. Sin embargo, la ganancia es pequeña y añade complejidad al modelo, por lo que se eliminó para mantener el pipeline simple y robusto.
+
+---
+
+## Por qué unos modelos son mejores que otros
+
+### Resultados con FinBERT (13.326 posts, split 60/20/20, Optuna 30 trials)
+
+| Ventana | Mejor modelo | Accuracy | LSTM accuracy |
+|---|---|---|---|
+| +1 día | RandomForest | **61.1%** | 52.2% |
+| +3 días | GradientBoosting | 59.7% | 51.6% |
+| +5 días | MLP | 54.9% | 51.4% |
+| +10 días | LogisticRegression | 55.1% | 51.6% |
+| +21 días | RandomForest | 55.7% | 52.2% |
+
+**Por qué RandomForest y GradientBoosting ganan a LogisticRegression:**
+Los modelos de árbol capturan interacciones no lineales entre features. Por ejemplo, "FinBERT positivo + alto volumen de posts + momentum alcista" es una combinación que predice mejor que cada feature por separado. La regresión logística solo puede aprender relaciones lineales.
+
+**Por qué MLP (red neuronal) es competitivo:**
+El MLP con early stopping aprende representaciones intermedias de las features, similar a los árboles pero de forma continua. Con Optuna ajustando el tamaño de capas y learning rate, encuentra configuraciones que capturan patrones que los árboles no ven.
+
+**Por qué el LSTM no supera a los modelos clásicos:**
+El LSTM necesita señal temporal clara y suficientes datos para aprender secuencias. Con 1.080 días y split 60/20/20, el conjunto de entrenamiento tiene ~648 secuencias de 30 días. El LSTM hace early stopping en epoch 22-25 con val_loss ~0.69 (entropía máxima para clasificación binaria), lo que indica que no aprende patrones secuenciales útiles. Los modelos clásicos con features de momentum (rolling 3d, 7d, delta) ya capturan la información temporal de forma más eficiente con menos datos.
+
+**Por qué el accuracy es moderado (~55-61%):**
+El sentimiento de Reddit predice el sentimiento futuro de Reddit, no el precio de la acción. La señal real existe (supera al baseline de ~50%) pero es débil porque:
+1. Los posts de Reddit son ruidosos — muchos son memes, no análisis
+2. El sentimiento tiene inercia de 1-2 días, no más
+3. Sin datos externos (precio, volumen de trading, noticias) el techo es ~65%
+
+---
+
+## Metodología anti-overfitting
+
+Para garantizar resultados honestos:
+
+- **Split temporal 60/20/20** — train (2023-2024) / validation (2024-2025) / test (2025-2026). El test nunca se toca durante el desarrollo
+- **Optuna sobre validation** — los hiperparámetros se buscan sobre el conjunto de validación, nunca sobre el test
+- **Permutation importance** — en lugar de impurity-based importance (sesgada hacia features con muchos valores), se usa permutation importance que mide el impacto real en el test set
+- **Etiqueta robusta** — la etiqueta usa cruce de EMAs (EMA3 > EMA10 en el futuro) en lugar de comparar futuro vs presente, evitando la correlación matemática trivial por mean-reversion
+- **Shuffle test** — se verificó que el accuracy real supera al obtenido con fechas aleatorizadas, confirmando que hay señal temporal genuina

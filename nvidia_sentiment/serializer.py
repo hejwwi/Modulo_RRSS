@@ -12,12 +12,10 @@ logger = logging.getLogger(__name__)
 
 # Columnas que se guardan en el CSV (orden fijo)
 CSV_COLUMNS = [
-    "id", "date", "created_utc", "subreddit",
+    "id", "date", "created_utc",
     "title", "selftext",
     "score", "num_comments", "has_image",
     "sent_finbert_label", "sent_finbert_pos", "sent_finbert_neg", "sent_finbert_neu",
-    "sent_bert_label", "sent_bert_pos", "sent_bert_neg",
-    "sent_socbert_label", "sent_socbert_pos", "sent_socbert_neg",
     "sent_text_only", "sent_multimodal",
     "image_local_path",
 ]

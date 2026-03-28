@@ -398,7 +398,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--models",
-        default="finbert bert socbert",
+        default="finbert",
         help="Modelos de texto a usar (separados por espacio)",
     )
     parser.add_argument(

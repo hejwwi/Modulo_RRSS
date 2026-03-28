@@ -10,24 +10,19 @@ _IDX_LABEL = {0: "positive", 1: "negative", 2: "neutral"}
 
 
 def _text_probs(post: dict) -> tuple[float, float, float]:
+    # FinBERT es el modelo principal
     if post.get("sent_finbert_label") not in (None, ""):
         return (
             float(post.get("sent_finbert_pos", 0.0)),
             float(post.get("sent_finbert_neg", 0.0)),
             float(post.get("sent_finbert_neu", 1.0)),
         )
-    if post.get("sent_bert_label") not in (None, ""):
-        pos = float(post.get("sent_bert_pos", 0.0))
-        neg = float(post.get("sent_bert_neg", 0.0))
-        return pos, neg, max(0.0, 1.0 - pos - neg)
     return 0.0, 0.0, 1.0
 
 
 def _text_label(post: dict) -> str:
     if post.get("sent_finbert_label") not in (None, ""):
         return post["sent_finbert_label"]
-    if post.get("sent_bert_label") not in (None, ""):
-        return post["sent_bert_label"]
     return "neutral"
 
 
