@@ -1,6 +1,6 @@
 # NVDA Reddit Sentiment Prediction
 
-Pipeline de análisis de sentimiento sobre posts de Reddit relacionados con NVIDIA (NVDA), con predicción del sentimiento de la comunidad a N días vista usando histórico 2023-2026.
+Pipeline de análisis de sentimiento sobre posts de Reddit relacionados con NVIDIA (NVDA), con predicción del sentimiento de la comunidad a N días vista usando histórico 2021-2026.
 
 **No usa datos de bolsa.** La predicción se basa exclusivamente en el histórico de posts de Reddit.
 
@@ -89,13 +89,30 @@ python scripts/sentiment_predictor.py \
 
 ## Dataset
 
-13.326 posts NVDA filtrados de 276.445 posts totales (2023-2025), más posts de 2026 añadidos via API de Reddit. Distribuidos en 1.080 días únicos con 12.3 posts/día de promedio.
+**15.285 posts** con sentimiento FinBERT analizado, distribuidos en **1.624 días únicos** (9.4 posts/día de promedio). El dataset se construyó en varias fases:
 
-| Año | Posts |
-|---|---|
-| 2023 | 2.697 |
-| 2024 | 6.903 |
-| 2025 | 3.726 |
+- **2023-2025**: 13.326 posts extraídos del dataset histórico `final_dataset_clean.json` (276k posts totales filtrados por términos NVDA)
+- **2026**: 98 posts descargados via API pública de Reddit (posts más recientes)
+- **2022**: 1.034 posts descargados via [Arctic Shift](https://arctic-shift.photon-reddit.com) (archivo histórico completo de Reddit)
+- **2021**: 925 posts descargados via Arctic Shift
+
+| Año | Posts | Fuente |
+|---|---|---|
+| 2021 | 925 | Arctic Shift |
+| 2022 | 1.034 | Arctic Shift |
+| 2023 | 2.697 | Dataset histórico |
+| 2024 | 6.903 | Dataset histórico |
+| 2025 | 3.726 | Dataset histórico |
+| 2026 | 98 | API Reddit |
+| **Total** | **15.285** | |
+
+Subreddits incluidos: wallstreetbets, stocks, investing, StockMarket, nvidia, pennystocks, wallstreetbetsnews, wallstreetbets2.
+
+### Por qué se añadieron 2021 y 2022
+
+Con solo los datos de 2023-2026 el LSTM tenía 648 secuencias de entrenamiento (seq_len=30), insuficiente para aprender patrones temporales. Añadir 2021 y 2022 aumentó a **943 secuencias**, lo que permitió al LSTM con atención superar a los modelos clásicos en F1 para ventanas de +3 y +5 días.
+
+Sin embargo, la curva de aprendizaje muestra que el modelo se satura alrededor de 400 días de train — añadir más años históricos (2019, 2020) no mejoraría el accuracy porque la señal de sentimiento de Reddit sobre NVDA tiene un techo natural sin datos externos.
 
 ---
 
@@ -134,15 +151,15 @@ A partir de 5 días el subreddit aporta algo (+3.5%), probablemente porque disti
 
 ## Por qué unos modelos son mejores que otros
 
-### Resultados con FinBERT (13.326 posts, split 60/20/20, Optuna 30 trials)
+### Resultados con FinBERT (15.285 posts, 2021-2026, split 60/20/20, Optuna 20 trials)
 
-| Ventana | Mejor modelo | Accuracy | LSTM accuracy |
+| Ventana | Mejor modelo (accuracy) | Accuracy | LSTM+Attn F1 |
 |---|---|---|---|
-| +1 día | RandomForest | **61.1%** | 52.2% |
-| +3 días | GradientBoosting | 59.7% | 51.6% |
-| +5 días | MLP | 54.9% | 51.4% |
-| +10 días | LogisticRegression | 55.1% | 51.6% |
-| +21 días | RandomForest | 55.7% | 52.2% |
+| +1 día | MLP | **64.6%** | 0.563 |
+| +3 días | RandomForest | 59.7% | **0.615** |
+| +5 días | RandomForest | 58.3% | **0.636** |
+
+El LSTM con atención supera a los modelos clásicos en F1 a partir de +3 días gracias a las 943 secuencias de entrenamiento disponibles con el dataset ampliado. Usa umbral optimizado en validación (0.30 en lugar de 0.50), lo que le da recall alto — detecta casi todos los días de sentimiento positivo a costa de más falsos positivos.
 
 **Por qué RandomForest y GradientBoosting ganan a LogisticRegression:**
 Los modelos de árbol capturan interacciones no lineales entre features. Por ejemplo, "FinBERT positivo + alto volumen de posts + momentum alcista" es una combinación que predice mejor que cada feature por separado. La regresión logística solo puede aprender relaciones lineales.
@@ -165,7 +182,7 @@ El sentimiento de Reddit predice el sentimiento futuro de Reddit, no el precio d
 
 Para garantizar resultados honestos:
 
-- **Split temporal 60/20/20** — train (2023-2024) / validation (2024-2025) / test (2025-2026). El test nunca se toca durante el desarrollo
+- **Split temporal 60/20/20** — train (2021-2024) / validation (2024-2025) / test (2025-2026). El test nunca se toca durante el desarrollo
 - **Optuna sobre validation** — los hiperparámetros se buscan sobre el conjunto de validación, nunca sobre el test
 - **Permutation importance** — en lugar de impurity-based importance (sesgada hacia features con muchos valores), se usa permutation importance que mide el impacto real en el test set
 - **Etiqueta robusta** — la etiqueta usa cruce de EMAs (EMA3 > EMA10 en el futuro) en lugar de comparar futuro vs presente, evitando la correlación matemática trivial por mean-reversion

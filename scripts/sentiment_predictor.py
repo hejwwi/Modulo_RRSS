@@ -301,69 +301,104 @@ def train_lstm(
         return None
 
     class SentLSTM(nn.Module):
-        def __init__(self, ni: int, h: int = 64, layers: int = 2, drop: float = 0.3):
+        """LSTM con atencion temporal y batch normalization."""
+        def __init__(self, ni: int, h: int = 128, layers: int = 2, drop: float = 0.2):
             super().__init__()
             self.lstm = nn.LSTM(ni, h, layers, batch_first=True,
-                                dropout=drop if layers > 1 else 0.0)
+                                dropout=drop if layers > 1 else 0.0,
+                                bidirectional=False)
+            # Atencion: aprende que timesteps son mas relevantes
+            self.attn = nn.Linear(h, 1)
+            self.bn   = nn.BatchNorm1d(h)
             self.drop = nn.Dropout(drop)
             self.fc   = nn.Sequential(
-                nn.Linear(h, 32), nn.ReLU(), nn.Dropout(drop), nn.Linear(32, 1)
+                nn.Linear(h, 64), nn.ReLU(), nn.Dropout(drop),
+                nn.Linear(64, 32), nn.ReLU(),
+                nn.Linear(32, 1),
             )
+
         def forward(self, x):
-            out, _ = self.lstm(x)
-            return self.fc(self.drop(out[:, -1, :])).squeeze(-1)
+            out, _ = self.lstm(x)                          # (B, T, H)
+            # Atencion sobre todos los timesteps
+            scores = self.attn(out).squeeze(-1)            # (B, T)
+            weights = torch.softmax(scores, dim=1)         # (B, T)
+            context = (out * weights.unsqueeze(-1)).sum(1) # (B, H)
+            context = self.bn(context)
+            return self.fc(self.drop(context)).squeeze(-1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("  LSTM: device=%s | seq_len=%d | features=%d | train_seqs=%d",
-                device, seq_len, n_features, len(y_tr))
+    logger.info("  LSTM+Attn: device=%s | seq_len=%d | features=%d | train=%d | val=%d | test=%d",
+                device, seq_len, n_features, len(y_tr), len(y_val), len(y_te))
 
-    def to_tensor(X, y):
-        return torch.tensor(X).to(device), torch.tensor(y).to(device)
+    def to_t(X, y=None):
+        Xt = torch.tensor(X, dtype=torch.float32).to(device)
+        if y is None:
+            return Xt
+        return Xt, torch.tensor(y, dtype=torch.float32).to(device)
 
-    Xt, yt   = to_tensor(X_tr_seq, y_tr)
-    Xv, yv   = to_tensor(X_val_seq, y_val)
-    Xte_t    = torch.tensor(X_te_seq).to(device)
+    Xt, yt = to_t(X_tr_seq, y_tr)
+    Xv, yv = to_t(X_val_seq, y_val)
+    Xte    = to_t(X_te_seq)
 
-    loader = DataLoader(TensorDataset(Xt, yt), batch_size=32, shuffle=False)
+    # Calcular peso de clase positiva para manejar desbalance
+    pos_ratio = float(y_tr.mean())
+    pos_weight = torch.tensor([(1 - pos_ratio) / max(pos_ratio, 1e-6)],
+                               dtype=torch.float32).to(device)
+
+    loader = DataLoader(TensorDataset(Xt, yt), batch_size=16, shuffle=False)
 
     model     = SentLSTM(n_features).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = nn.BCEWithLogitsLoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-3)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
-    best_val_loss, patience_count, best_state = float("inf"), 0, None
-    for epoch in range(200):
+    best_val_f1, patience_count, best_state = -1.0, 0, None
+    PATIENCE = 25
+
+    for epoch in range(300):
         model.train()
         for xb, yb in loader:
             optimizer.zero_grad()
             loss = criterion(model(xb), yb)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
+        scheduler.step()
 
-        # Validation loss para early stopping
+        # Validar con F1 (mejor metrica para clases desbalanceadas)
         model.eval()
         with torch.no_grad():
-            val_loss = criterion(model(Xv), yv).item()
-        scheduler.step(val_loss)
+            val_pred = (torch.sigmoid(model(Xv)) > 0.5).cpu().numpy().astype(int)
+        val_f1 = float(f1_score(y_val, val_pred, zero_division=0))
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
             patience_count = 0
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
         else:
             patience_count += 1
-            if patience_count >= 20:
-                logger.info("  LSTM early stopping en epoch %d (val_loss=%.4f)", epoch+1, best_val_loss)
+            if patience_count >= PATIENCE:
+                logger.info("  LSTM early stop epoch %d (best val_f1=%.4f)", epoch+1, best_val_f1)
                 break
 
     model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        y_pred = (torch.sigmoid(model(Xte_t)) > 0.5).cpu().numpy().astype(int)
+        logits = model(Xte)
+        probs  = torch.sigmoid(logits).cpu().numpy()
+        # Umbral optimo sobre validacion
+        best_thr, best_f1_thr = 0.5, -1.0
+        for thr in np.arange(0.3, 0.71, 0.05):
+            vp = (torch.sigmoid(model(Xv)) > thr).cpu().numpy().astype(int)
+            f = float(f1_score(y_val, vp, zero_division=0))
+            if f > best_f1_thr:
+                best_f1_thr = f
+                best_thr = thr
+        y_pred = (probs > best_thr).astype(int)
+        logger.info("  LSTM umbral optimo=%.2f (val_f1=%.4f)", best_thr, best_f1_thr)
 
     return {
-        "model":     f"LSTM (seq={seq_len})",
+        "model":     f"LSTM+Attn (seq={seq_len})",
         "accuracy":  float(accuracy_score(y_te, y_pred)),
         "precision": float(precision_score(y_te, y_pred, zero_division=0)),
         "recall":    float(recall_score(y_te, y_pred, zero_division=0)),
