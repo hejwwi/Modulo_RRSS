@@ -32,7 +32,8 @@ proyecto/
 │
 ├── data/                          # Salidas generadas (en .gitignore)
 │   ├── images/                    # Imágenes descargadas
-│   ├── nvda_processed.csv         # Posts procesados con sentimiento FinBERT
+│   ├── nvda_processed.csv         # Posts procesados con sentimiento FinBERT (15.285 posts)
+│   ├── nvda_processed_clean.csv   # Dataset filtrado sin ruido (6.260 posts, score>=5)
 │   └── sent_model_comparison.csv  # Resultados de los modelos de predicción
 │
 └── pipeline.py                    # Orquestador principal
@@ -78,10 +79,18 @@ python scripts/update_dataset.py --days 14 --min_score 20 --dry_run
 ## Entrenar los modelos de predicción
 
 ```bash
+# Con dataset completo (15k posts) — máximo accuracy
 python scripts/sentiment_predictor.py \
   --input data/nvda_processed.csv \
   --windows 1 3 5 10 21 \
   --n_trials 30 \
+  --seq_len 30
+
+# Con dataset limpio (6k posts, sin ruido) — mejor F1 para LSTM
+python scripts/sentiment_predictor.py \
+  --input data/nvda_processed_clean.csv \
+  --windows 1 3 5 \
+  --n_trials 20 \
   --seq_len 30
 ```
 
@@ -116,7 +125,71 @@ Sin embargo, la curva de aprendizaje muestra que el modelo se satura alrededor d
 
 ---
 
-## Por qué FinBERT y no SocBERT
+## Análisis de ruido en el dataset
+
+El 60% de los posts originales son ruido que distorsiona los promedios diarios de sentimiento:
+
+| Tipo de ruido | Posts afectados | Impacto |
+|---|---|---|
+| Score < 5 (nadie lo votó) | 7.640 (50%) | Promedio diario puede variar hasta 0.75 puntos |
+| Título < 15 chars | 1.563 (10%) | FinBERT analiza texto insuficiente |
+| Selftext [deleted]/[removed] | ~500 (3%) | Texto eliminado, solo queda título |
+| Sentimiento plano (max(pos,neg) < 0.05) | ~2.000 (13%) | No aporta señal |
+
+Se creó `nvda_processed_clean.csv` aplicando estos filtros: `score >= 5`, `len(title) >= 15`, `selftext != [deleted]`, `max(sent_finbert_pos, sent_finbert_neg) > 0.05`. Resultado: **6.260 posts de calidad** (4.5 posts/día).
+
+---
+
+## Qué modelo usar según el objetivo
+
+La elección depende de qué significa "acertar" en tu caso de uso:
+
+| Objetivo | Modelo recomendado | Dataset | Accuracy | Precisión | Recall |
+|---|---|---|---|---|---|
+| Máxima exactitud general | **MLP** | original (15k) | **64.6%** | 64.8% | 52.3% |
+| No perderse ningún día positivo | **LSTM+Attn** | limpio (6k) | 48.6% | 48.6% | **100%** |
+
+**MLP + dataset original** es la mejor opción si quieres predecir con la mayor exactitud posible. Cuando predice "mañana el sentimiento será positivo", acierta el 64.8% de las veces.
+
+**LSTM+Attn + dataset limpio** es útil si el coste de perderse un día positivo es alto. Detecta el 100% de los días positivos pero genera muchas falsas alarmas (precisión 48.6%).
+
+### Qué es el F1 y por qué importa
+
+El F1 es la media armónica entre precisión y recall:
+
+- **Precisión**: de todas las veces que el modelo predijo "positivo", ¿cuántas acertó?
+- **Recall**: de todos los días realmente positivos, ¿cuántos detectó el modelo?
+- **F1**: combina ambos — penaliza tanto los falsos positivos como los falsos negativos
+
+El accuracy puede ser engañoso cuando las clases están desbalanceadas (43% positivos vs 57% negativos). Un modelo que prediga siempre "negativo" tendría 57% de accuracy sin aprender nada. El F1 detecta ese comportamiento.
+
+### Resultados completos por ventana (dataset original, 15k posts)
+
+**+1 día**
+
+| Modelo | Accuracy | Precisión | Recall | F1 |
+|---|---|---|---|---|
+| **MLP** | **64.6%** | 64.8% | 52.3% | 0.579 |
+| LogisticRegression | 63.4% | 64.8% | 46.4% | 0.541 |
+| RandomForest | 60.9% | 60.3% | 46.4% | 0.524 |
+| GradientBoosting | 60.3% | 60.4% | 42.4% | 0.498 |
+| LSTM+Attn (seq=30) | 57.3% | 53.6% | 59.1% | 0.562 |
+
+**+3 días**
+
+| Modelo | Accuracy | Precisión | Recall | F1 |
+|---|---|---|---|---|
+| **RandomForest** | **59.7%** | 71.7% | 21.9% | 0.335 |
+| MLP | 59.4% | 66.1% | 25.8% | 0.371 |
+| LSTM+Attn (seq=30) | 49.8% | 47.8% | 86.1% | **0.615** |
+
+**+5 días**
+
+| Modelo | Accuracy | Precisión | Recall | F1 |
+|---|---|---|---|---|
+| **RandomForest** | **58.3%** | 63.3% | 25.2% | 0.360 |
+| MLP | 54.9% | 57.1% | 13.2% | 0.215 |
+| LSTM+Attn (seq=30) | 46.6% | 46.6% | 100% | **0.636** |
 
 Se probaron tres modelos de análisis de sentimiento de texto:
 
@@ -153,13 +226,7 @@ A partir de 5 días el subreddit aporta algo (+3.5%), probablemente porque disti
 
 ### Resultados con FinBERT (15.285 posts, 2021-2026, split 60/20/20, Optuna 20 trials)
 
-| Ventana | Mejor modelo (accuracy) | Accuracy | LSTM+Attn F1 |
-|---|---|---|---|
-| +1 día | MLP | **64.6%** | 0.563 |
-| +3 días | RandomForest | 59.7% | **0.615** |
-| +5 días | RandomForest | 58.3% | **0.636** |
-
-El LSTM con atención supera a los modelos clásicos en F1 a partir de +3 días gracias a las 943 secuencias de entrenamiento disponibles con el dataset ampliado. Usa umbral optimizado en validación (0.30 en lugar de 0.50), lo que le da recall alto — detecta casi todos los días de sentimiento positivo a costa de más falsos positivos.
+Ver tabla completa en la sección "Qué modelo usar según el objetivo".
 
 **Por qué RandomForest y GradientBoosting ganan a LogisticRegression:**
 Los modelos de árbol capturan interacciones no lineales entre features. Por ejemplo, "FinBERT positivo + alto volumen de posts + momentum alcista" es una combinación que predice mejor que cada feature por separado. La regresión logística solo puede aprender relaciones lineales.
